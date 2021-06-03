@@ -1,0 +1,296 @@
+---
+title: 'IA #2 - Justin Wagers (jww3243)'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  fig_width: 3
+  fig_height: 2
+  html_notebook: default
+---
+
+```{r, include = FALSE}
+library(fpp3)
+library(fable)
+library(tseries)
+```
+
+
+```{r, include = FALSE}
+D <- read.csv("US Retail Sales.csv") %>% 
+  mutate(DATE = yearquarter(mdy(DATE)),
+         RETAIL = as.numeric(RETAIL),
+         GROC  = as.numeric(GROC),
+         ECOMM = ifelse(is.na(ECOMM),0,as.numeric(ECOMM))) %>%
+  gather("SECTOR", "SALES", RETAIL, GROC, ECOMM) %>%
+  as_tsibble(index = DATE, key = "SECTOR")
+  
+D %>% autoplot(SALES) + 
+  facet_grid(vars(SECTOR), scales = "free_y")
+```
+
+We are interested in developing a long-term quarterly forecating model (20 quarters) for the national sales of each of the three sectors in the data set.  For this purpose we subset the data into *training* and *testing* sets as follows:
+
+```{r, include = TRUE}
+# Training Set
+TR <- D %>% filter(DATE <= yearquarter("2014 Q4"))
+# Testing Set
+TE <- D %>% filter(DATE >= yearquarter("2015 Q1"))
+```
+
+
+1. Using the automatic selection feature in *fable* fit an ARIMA and an ETS model for each of the three time series (six models in total).  Report the name/order of each model and the corresponding AICc and BIC.
+
+```{r, echo = TRUE}
+m_ecomm <- TR %>%
+  filter(SECTOR == 'ECOMM') %>% 
+  model (m1 = ARIMA(SALES),
+         m2 = ETS(SALES))
+
+m_groc <- TR %>%
+  filter(SECTOR == 'GROC') %>% 
+  model (m1 = ARIMA(SALES),
+         m2 = ETS(SALES))
+
+m_retail <- TR %>%
+  filter(SECTOR == 'RETAIL') %>% 
+  model (m1 = ARIMA(SALES),
+         m2 = ETS(SALES))
+```
+
+ECOMM models (ARIMA and ETS):
+
+```{r, echo= TRUE}
+m_ecomm %>% select(m1) %>% report() 
+m_ecomm %>% select(m2) %>% report()
+```
+
+GROC models (ARIMA and ETS):
+
+```{r, echo = TRUE}
+m_groc %>% select(m1) %>% report() 
+m_groc %>% select(m2) %>% report()
+```
+
+RETAIL models (ARIMA and ETS):
+
+```{r, echo = TRUE}
+m_retail %>% select(m1) %>% report() 
+
+m_retail %>% select(m2) %>% report() 
+```
+
+2. Examine the residuals of all the models using the Ljung-Box test and the **gg_tsresiduals()** function. Is there a validity problem with any of the models?
+
+We can look at the Ljung-Box test for the ARIMA and ETS models for each series:
+
+```{r, echo = TRUE}
+m_ecomm %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+m_groc %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+m_retail %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+```
+From the ljung-box test we can see that for both Ecommerce models, the residuals are apparently correlated as we see p-values near or below 0.05, which is a problem for a valid model. For the grocery models, the auto ETS (m2) model might be ok, but the ARIMA(m1) definitely has correlated residuals with a very low p-value. Finally, both the ETS and ARIMA models for retail sales appear to have uncorrelated residuals, with p-values well above 0.05 - these models might be ok in terms of residual correlation. 
+
+Now we can look at the residuals visually, first for the ecommerce model:
+
+## Ecommerce - ARIMA
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_ecomm %>% select(m1) %>% gg_tsresiduals()
+```
+
+## Ecommerce - ETS
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_ecomm %>% select(m2) %>% gg_tsresiduals()
+```
+
+Here we can see that for the ETS model of the ecommerce sales data, the residuals actually look quite normally distributed, perhaps with a high concentration around the mean. Additionally, there aren't any significant autocorrelations. However, the ARIMA model shows some autocorrelations and a less normal distribution of residuals. We will try to improve upon these models by differencing the series. 
+
+## Grocery - ARIMA 
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_groc %>% select(m1) %>% gg_tsresiduals()
+```
+
+## Grocery - ETS
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_groc %>% select(m2) %>% gg_tsresiduals()
+```
+
+With the grocery residuals shown above, the ETS model has one significant autocorrelation but the residuals look normally distributed. This could potentially be improved. The ARIMA, however, has no significant autocorrelations and looks relatively normally distributed. We will try to improve upon these models by differencing the series.
+
+## Retail ARIMA
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_retail %>% select(m1) %>% gg_tsresiduals()
+```
+
+## Retail ETS
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_retail %>% select(m2) %>% gg_tsresiduals() 
+
+```
+
+For the retail sales residuals, the ARIMA model looks quite normally distributed. It has one potentially significant autocorrelation but this might be ok. This auto ETS looks normally distributed as well, with a bit of a left tail in the residual distribution and one significant autocorrelation. We will keep these models. (They might be improved by differencing but since we are doing that for the other two series we decide to leave these models as-is out of curiosity for their performance).
+
+3. For each of the models with validity problems, find an alternate model making manual order and/or model-type selections.  For the model(s) selected, report the model name/order, AICc, BIC, and examine the residuals.
+
+```{r, include = TRUE}
+
+TR %>% 
+  mutate(d1 = difference(SALES),
+         d12 = difference(SALES, 12),
+         d1.12 = difference(d12)) -> TR
+
+TE %>% 
+  mutate(d1 = difference(SALES),
+         d12 = difference(SALES, 12),
+         d1.12 = difference(d12)) -> TE
+
+m_ecomm <- TR %>%
+  filter(SECTOR == 'ECOMM') %>% 
+  model (m1 = ARIMA(d1),
+         m2 = ARIMA(d1 ~ 0 + pdq(0,0,2) + PDQ(2,1,2)))
+
+m_groc <- TR %>%
+  filter(SECTOR == 'GROC') %>% 
+  model (m1 = ARIMA(d1),
+         m2 = ARIMA(d1 ~ 0 + pdq(0,0,0) + PDQ(0,1,3)))
+
+m_retail <- TR %>%
+  filter(SECTOR == 'RETAIL') %>% 
+  model (m1 = ARIMA(SALES),
+         m2 = ETS(SALES))
+
+
+```
+
+For the Retail sales series, we accept the auto ARIMA(2,0,1)(0,1,1) and the auto ETS (M,A,M) as a reasonable fit for the data. In order to fit a better model for other two series, we first take a difference of the SALES data, then fit some auto ARIMA models on this newly differenced data for the Grocery and Ecommerce sales data. 
+
+For the grocery sales data, the model suggested is an ARIMA(0,0,0)(0,1,1) and we also add more lags and try an ARIMA(0,0,0)(0,1,3). the report for these models is shown below. 
+
+```{r, echo= TRUE}
+m_groc %>% select(m1) %>% report() 
+m_groc %>% select(m2) %>% report()
+```
+
+For the ecommerce sales data, the model suggested is an ARIMA(0,0,0)(2,1,2) and we also add more non-seasonal MA terms and try an ARIMA(0,0,2)(2,1,2). the report for these models is shown below.
+
+```{r, echo= TRUE}
+m_ecomm %>% select(m1) %>% report() 
+m_ecomm %>% select(m2) %>% report()
+```
+We can again look at the residuals for these newly created models with a Ljung-Box test. 
+
+```{r, echo = TRUE}
+m_ecomm %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+m_groc %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+```
+The p-values well above .05 for all four models suggest that the residuals are uncorrelated, a promising sign. We can also evaluate residual plots for the new models, shown below. 
+
+## Ecommerce- New ARIMA (0,0,0)(2,1,2)
+
+```{r, echo = TRUE, warning = FALSE, fig.width=4, fig.height=3}
+m_ecomm %>% select(m1) %>% gg_tsresiduals()
+```
+
+## Ecommerce- New ARIMA (0,0,2)(2,1,2)
+
+```{r, echo = TRUE, warning = FALSE, fig.width=4, fig.height=3}
+m_ecomm %>% select(m2) %>% gg_tsresiduals()
+```
+
+The residual plots for the ecommerce models look normally distributed with perhaps a higher concentration around the mean and no significant autocorrelations. 
+
+## Grocery - new ARIMA (0,0,0)(0,1,1)
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_groc %>% select(m1) %>% gg_tsresiduals()
+```
+
+## Grocery - new ARIMA (0,0,0)(0,1,3)
+
+```{r, echo = TRUE, fig.width=4, fig.height=3}
+m_groc %>% select(m2) %>% gg_tsresiduals()
+```
+
+Both ARIMA models for the gorcery sales series show normal distribution of the residuals and perhaps 1-2 cases of autocorrelation. These models will be acceptable for our forecast. 
+
+4. For the set of six models selected (automatically and/or manually) prepare 20 quarter forecasts and examine the *training* and *testing* accuracy metrics.  Based on a holistic analysis of the information criteria, MAE and MAPE, select the best model for each **SECTOR** and report the model name/order and their parameter values.
+
+Now, we can evaluate our models for each series by looking at training and test accuracy. First, look at training accuracy:
+
+```{r, echo = TRUE}
+m_groc %>% accuracy() 
+m_retail %>%accuracy()
+m_ecomm %>% accuracy()
+```
+Clearly the retail models have a higher error than the grocery and ecommerce models. Perhaps we could reconsider the retail models and run them on the differenced data as we did for the other two series. 
+
+Now, look at test accuracy and choose the best model for each series.
+
+```{r, echo = TRUE}
+m_groc %>% forecast (h = 20) -> fg 
+m_retail %>% forecast (h = 20) -> fr
+m_ecomm %>% forecast (h = 20) -> fe 
+
+fg %>% accuracy(TE)
+fr %>% accuracy(TE)
+fe %>%accuracy(TE)
+```
+For grocery both models are comparable, but, m2, which is an ARIMA (0,0,0)(0,1,3) might be the better model choice with a lower MAPE despite a slightly higher MAE.
+
+For retail, m1, which is an ARIMA (2,0,1)(0,1,1) is the better model choice with a lower MAE and MAPE. 
+
+For ecommerce, m1, which is an ARIMA (0,0,0)(2,1,2) is the slightly better model with a lower MAE and MAPE. 
+
+5. For any ARIMA model in (4) write the corresponding B-polynomial.
+
+![B notation](IMG_4510.jpg){width = 70%}
+
+6. Plot the best forecast for each **SECTOR**, their 80% and 95% confidence intervals and overlay the testing data.  
+
+
+## Grocery Forecast
+
+```{r, echo = TRUE, fig.width=5, fig.height=2, warning = FALSE}
+fg %>% filter(.model =='m2') %>% 
+  autoplot() +
+  geom_point(data = TE%>% filter (SECTOR =='GROC'), mapping = aes(y = d1))
+```
+
+## Ecommerce Forecast
+
+```{r, echo = TRUE, fig.width=5, fig.height=2,warning = FALSE}
+fe %>% filter(.model =='m1') %>% 
+  autoplot() +
+  geom_point(data = TE %>% filter (SECTOR =='ECOMM'), mapping = aes(y = d1))
+```
+
+## Retail Forecast
+
+```{r, echo = TRUE, fig.width=5, fig.height=2, warning = FALSE}
+fr %>% filter(.model =='m1') %>% 
+  autoplot() +
+  geom_point(data = TE %>% filter (SECTOR =='RETAIL'), mapping = aes(y = SALES))
+
+  
+
+```
+
+The forecast plots show relatively good forecasts for all three series. 
+
+For the grocery series, there's one outlier point at the beginning of the series but otherwise the forecast seems to fit the data quite well, capturing the seasonality pattern we would expect. 
+
+For the ecommerce series, the forecast seems to fit the data quite well, capturing the seasonality pattern we would expect. 
+
+For the retail series, the forecast confidence intervals are quite wide. Although it does capture the seasonality we would expect, this model could use some fine tuning and we might explore differencing the time series data in an attempt to acquire a more accurate forecast. 
+

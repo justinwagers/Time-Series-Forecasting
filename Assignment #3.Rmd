@@ -1,0 +1,241 @@
+---
+title: 'Justin Wagers- IA #3'
+output:
+  html_document:
+    df_print: paged
+---
+***
+<center> 
+### Justin Wagers - jww3243
+### Embeding a Demand Function into an ARIMA Model:
+### Regression with ARIMA Errors Laboratory.
+</center>
+***
+
+
+```{r, message=FALSE, warning=FALSE, include = FALSE}
+library(fpp3)
+library(reshape2)
+library(glmnet)
+
+# Data Pre-Processing 
+#
+PBS <- read.csv("PBS (1).csv") %>% 
+  mutate( F_LSA=ifelse(F=="A+",1,0),      # Large Size Ad Dummy
+          F_MSA=ifelse(F=="A",1,0),       # Medium Size Ad Dummy
+          F_SSA=ifelse(F=="B",1,0)) %>%   # Small Size Ad Dummy
+  # Promotional variables are weighted by sales volume (oz)
+  mutate(S_LB = UNITS * VOL_EQ,
+         WF_LSA = F_LSA * S_LB,     # Large Size Ad Weighted
+         WF_MSA = F_MSA * S_LB,     # Medium Size Ad Weighted
+         WF_SSA = F_SSA * S_LB,     # Small Size Ad Weighted
+         WD     = D * S_LB) %>%     # In-Store Display Weighted
+  mutate(VEND =ifelse(VEND == 48001,"SK",
+                      ifelse( VEND == 99998,"PL","OB"))) %>%
+  select(-F)
+
+# Create aggregate variables by product-week
+x.pw <- PBS %>% group_by(WEEK, VEND) %>% 
+  summarise(S.DOLLARS = sum(DOLLARS),      # Total $ Sales 
+            S.S_LB    = sum(S_LB),         # Total L. Sales
+            S.WF_LSA  = sum(WF_LSA),       # Total Weighted Large Ad
+            S.WF_MSA  = sum(WF_MSA),       # Total Weighted Medium Ad
+            S.WF_SSA  = sum(WF_SSA),       # Total Weighted Small Ad
+            S.WD      = sum(WD)) %>%       # Total Weighted Store Disp
+  # Calculate weigted averages of Advertising and Promotion variables
+  mutate(A.PPU = log(S.DOLLARS / S.S_LB),  # Log of Avg. Price ($/pound)
+         S.WF_LSA  = S.WF_LSA / S.S_LB,    # Avg. Weighted Large Ad
+         S.WF_MSA  = S.WF_MSA / S.S_LB,    # Avg. Weighted Medium Ad
+         S.WF_SSA  = S.WF_SSA / S.S_LB,    # Avg. Weighted Small Ad
+         S.WD      = S.WD / S.S_LB)        # Avg. Weighted Store Disp
+
+#
+x.pw <- x.pw %>%
+  mutate(LS  = log(S.S_LB)) %>% 
+  select(-S.DOLLARS, -S.S_LB)
+#
+# Creeate separate dataframes for each brand group
+x.SK <- x.pw %>% filter(VEND == "SK") %>% select(-VEND)
+colnames(x.SK) <- c("WEEK","WF_LSA.SK","WF_MSA.SK","WF_SSA.SK","S.WD.SK","PPU.SK","LS.SK" )
+x.OB <- x.pw %>% filter(VEND == "OB") %>% select(-VEND,-LS)
+colnames(x.OB) <- c("WEEK","WF_LSA.OB","WF_MSA.OB","WF_SSA.OB","S.WD.OB","PPU.OB")
+x.PL <- x.pw %>% filter(VEND == "PL") %>% select(-VEND,-LS)
+colnames(x.PL) <- c("WEEK","WF_LSA.PL","WF_MSA.PL","WF_SSA.PL","S.WD.PL","PPU.PL")
+
+#Join the product-specific dataframes to create an expanded dataframe for SK using the 
+# data from competing products as additional columns to be used as predicitve variables
+
+xmat <- x.SK %>%
+  left_join(x.OB,by="WEEK") %>%
+  left_join(x.PL,by="WEEK")
+
+# If your code executed correctly xmat should have 17 cols and 104 rows.
+#
+xm <- model.matrix(LS.SK ~(. - WEEK)^2 , data=xmat)[,-1]
+y <- xmat$LS.SK
+
+#Separation of Training and Testing sets
+xm.tr <- xm[1:94,]
+y.tr <-  y[1:94]
+xm.te <- xm[95:104,]
+y.te <-  y[95:104]
+#
+```
+
+
+1. (5 pts) After pre-processing the data, notice that you have 120 predictive variables plus the sales vector.  Notice that the pre-processing step already computes the log of the average prices and sales volumes. Now use The Lasso on the training set to obtain (a) a regularized model and (b) the reduced set of predictive variables that minimize the cross-validated MSE over the training set (i.e., the set of variables included in the Lasso-regularized model). (Use set.seed(1) before 10-fold cross-validation).  Report the coefficients of the regularized model.
+
+```{r, echo = TRUE}
+set.seed(1)
+cv_output <- cv.glmnet(xm.tr, y.tr, alpha = 1)
+lambda_best <- cv_output$lambda.min 
+lambda_best
+
+lasso_model <- glmnet(xm.tr, y.tr, alpha = 1, lambda = lambda_best, standardize = TRUE)
+
+library(broom)
+
+lasso_model %>% tidy()
+```
+From the output above we can see that cross-validation chose a best lambda of .06839 for the lasso model. Running the lasso model with the optimal lambda yields 4 variables included in the model: PPU.SK + WF_LSA.SK:PPU.OB + S.WD.SK:PPU.OB + S.WD.SK:PPU.PL. Their individual coefficients are shown above.  
+
+
+2. (5 pts) Use the training set to fit an unrestricted regression model (i.e., **lm(…)** ) on the reduced set of explanatory variables identified by The Lasso.  Report the coefficients of the full model and comment on the fit of the model and examine the auto-correlations of the residuals of this model. 
+
+```{r, echo = TRUE}
+x_train <- as.data.frame(xm.tr)
+x_train$Demand = y.tr
+linearMod <- lm(Demand ~ PPU.SK + WF_LSA.SK:PPU.OB + S.WD.SK:PPU.OB + S.WD.SK:PPU.PL, data=x_train) 
+
+summary(linearMod)
+```
+
+Running an unrestricted linear model with the variables chosen by lasso yields the output shown above. We see an $R^2$ value of .8514, indicating that their is room for improvement for the fit of this data.
+
+```{r, echo = TRUE, warning = FALSE}
+library(fpp3)
+library(fable)
+library(tseries)
+library(forecast)
+
+checkresiduals(linearMod)
+```
+
+From examining the residuals above, we can see some autocorrelation in the residuals in the ACF at the first lag. This is confirmed by the Breusch-Godfrey test which has a p-value below 0.05, indicating the presence of correlation among the residuals. The residuals seem to be somewhat normally distributed. 
+
+3. (5 pts) Use the  **ARIMA()** to fit a simple ARIMA model (not a regression with ARIMA errors model) to explain the training set log-of-sales-volume data. Report the diagnostic of your model’s residuals and comment on the model’s validity.  
+
+To run an ARIMA, we must first turn the data into a time series object with WEEK as the index. We can conduct the same train test split and then turn our train and testing sets into tsibbles. 
+
+```{r, echo = TRUE}
+y <- xmat$LS.SK
+
+xm.tr <- xmat[1:94,]
+y.tr <-  y[1:94]
+xm.te <- xmat[95:104,]
+y.te <-  y[95:104]
+
+xtr_ts <- as_tsibble(xm.tr, key = NULL, index = WEEK)
+xte_ts <- as_tsibble(xm.te, key = NULL, index = WEEK)
+
+m_arima <- xtr_ts %>%
+  model (m1 = ARIMA(LS.SK))
+
+m_arima %>% report()
+```
+
+We can see that the auto ARIMA fit an ARIMA (2,0,1). Let us examine the residuals below:
+
+```{r, echo = TRUE}
+m_arima %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+```
+We can see from the ljung-box test that the residuals of the ARIMA model are likely uncorrelated with a p-value of .99. We can also look at the residuals visually:
+
+```{r, echo=TRUE}
+m_arima %>% gg_tsresiduals()
+```
+
+The residuals of our ARIMA model look quite good. There are no significant autocorrelations and they appear relatively normally distributed. 
+
+4. (5 pts) Use the model in Question 3 to prepare a 10 period ahead forecast and compare it (overly it) with the testing set log-of-sales data.  Comment on the usefulness of this model in terms of precision and confidence interval. 
+
+```{r, echo = TRUE}
+m_arima %>% forecast (h = 10) -> f
+
+f %>% accuracy(xte_ts)
+
+f %>% filter(.model =='m1') %>% 
+  autoplot() +
+  geom_point(data = xte_ts, mapping = aes(y = LS.SK))
+```
+
+While the accuracy metrics look ok for the arima model, a visualization of the forecast shows us that it is almost completely useless. The confidence interval of the forecast is way too wide to give us any sort of precise prediction of sales. 
+
+5. (5 pts) Use the **ARIMA()** function to automatically fit a regression with ARIMA errors model to explain sales data (log) using only the predictive variables identified by The Lasso in Question 1.  Examine the model’s residuals and comment on its validity. 
+```{r, echo = TRUE}
+m_arima2 <- xtr_ts %>%
+  model (m1 = ARIMA(LS.SK ~ PPU.SK + WF_LSA.SK:PPU.OB + S.WD.SK:PPU.OB + S.WD.SK:PPU.PL))
+
+m_arima2 %>% report()
+
+```
+When we fit the regression with ARIMA errors, we can see that the automatic ARIMA fits an LM with ARIMA (0,1,2) on the errors. We can examine the residuals of this model below. 
+
+```{r, echo = TRUE}
+m_arima2 %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+```
+
+The ljung-box test confirms that the residuals are likely uncorrelated with a p-value of .27, but we can also look at them visually:
+
+
+```{r, echo=TRUE}
+m_arima2 %>% gg_tsresiduals()
+```
+
+The residuals of the regression with ARIMA errors look quite promising. from the ACF plot we see no significant autocorrelations and they appear to be random and normally distributed. 
+
+6. (5 pts) Obtain a regression with ARIMA errors model that improves on the automatically selected model in Question 5 in terms of its information coefficients and residual diagnostics. Compare the coefficients of the explanatory variables in (a) The Lasso model, (b) The unrestricted model obtained in Question 2, and (c) The ones obtained in this question.  Then use the B notation (polynomial) to describe the model you obtained.  
+
+
+
+```{r, echo = TRUE}
+m_arima3 <- xtr_ts %>%
+  model (m1 = ARIMA(LS.SK ~ PPU.SK + WF_LSA.SK:PPU.OB + S.WD.SK:PPU.OB + S.WD.SK:PPU.PL  + pdq(1,0,1) ))
+
+m_arima3 %>% report()
+```
+
+Above, we leave the same variables in the regression but change the ARIMA errors to (1,0,1) instead of (0,1,2). This leads to a slightly lower AIC and AICc than the original model, and we can look at the residuals below:
+
+```{r, echo = TRUE}
+m_arima3 %>%  augment() %>% 
+  features(.resid, ljung_box, lag = 24)
+```
+The ljung-box test returns an even higher p-value than previously at .328, indicating that this model's residuals are likely uncorrelated at a higher confidence level than the original model. 
+
+We can also look at them visually:
+
+```{r, echo=TRUE}
+m_arima3 %>% gg_tsresiduals()
+```
+
+Interestingly, we do see at least one, perhaps 2 significant autocorrelations in the ACF despite the ljung-box test results. So overall, this model has lower information criterion and a higher ljung-box p value, but we are unsure of if/how much better it will perform for forecasting than the original model. 
+
+7. (5 pts) Use the model in Question 5 to prepare a 10 period ahead forecast and compare it (overlay it) with the testing set log-of-sales data. You can also obtain the values of the regressors used in the forecasting model from the testing data set **xm.te**.  Comment on the usefulness of this model in terms of precision and confidence interval relative to the model without explanatory variables in Question 3. 
+
+```{r, echo = TRUE}
+
+f <- m_arima2 %>% 
+  select(m1) %>%
+  forecast(xte_ts)
+
+f %>% accuracy(xte_ts)
+
+f %>% filter(.model =='m1') %>% 
+  autoplot() +
+  geom_point(data = xte_ts, mapping = aes(y = LS.SK))
+```
+
+We can see from the forecast plot above that while the forecast isn't perfect, it fits the test data much more cleanly than the ARIMA model alone. The actual sales figures fall within the confidence intervals of the forecast with only one exception, and the forecast is much more precise than before. 
